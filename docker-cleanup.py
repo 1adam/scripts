@@ -141,7 +141,11 @@ else:
 
 if len(removeImages):
     for ri in removeImages:
-        print "Removing image", ri, client.images.get(ri).tags[0], "...",
+        try:
+           iname = client.images.get(ri).tags[0]
+        except IndexError:
+           iname = "<no tag>"
+        print "Removing image", ri, iname, "...",
         if DRYRUN:
             print "(not really)",
         else:
