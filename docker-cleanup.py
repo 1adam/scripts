@@ -1,5 +1,4 @@
 #!/usr/bin/env python
-
 # github.com/1adam
 
 import docker, sys
@@ -29,7 +28,7 @@ DEBUGMODE=False
 # number of containers/images to retain (take the latest N from the .list() return value)
 # i.e. '2' means keep the latest image/container, and one image/container previous in a given image tag
 # (e.g. the 'gsum' in the docker tag 'gsum:1.23')
-NTR=2 
+NTR=5
 
 if "--help" in sys.argv[1:]:
     print "Usage:"
@@ -45,6 +44,10 @@ if "--noop" in sys.argv[1:]:
 
 if "--debug" in sys.argv[1:]:
     DEBUGMODE=True
+
+initExistingImages=[]
+for iei in client.images.list():
+    initExistingImages.append( iei.id )
 
 runConts={}
 runImgKeep=[]
@@ -79,8 +82,16 @@ for img, id in exitedConts.iteritems():
 
 preKeepImages = runImgKeep + runRepoKeep + exitedRepoKeep
 
+lonelyImgs=[]
+for iei in initExistingImages:
+    if iei not in preKeepImages:
+        ieiName = client.images.get(iei).tags[0].split(":")[0]
+        for eieio in client.images.list(ieiName)[:NTR]:
+            if eieio.id not in lonelyImgs:
+                lonelyImgs.append( eieio.id )
+
 parentsOfKeepImages = []
-for pki in preKeepImages:
+for pki in (preKeepImages + lonelyImgs):
     parentId = client.images.get(pki).attrs['Parent']
     if len(parentId) > 0:
         imgParent = findTheInitialParent( parentId )
@@ -88,10 +99,13 @@ for pki in preKeepImages:
             if imgParent not in parentsOfKeepImages:
                 parentsOfKeepImages.append( imgParent )
 
-keepImages = set( preKeepImages + parentsOfKeepImages )
+keepImages = set( preKeepImages + parentsOfKeepImages ) | set( lonelyImgs )
 
 if DEBUGMODE:
     print "-- *** DEBUG *** --"
+    print "lonelyImgs:"
+    debugPrint(lonelyImgs)
+    print ""
     print "runConts:"
     for rcimg, rcid in runConts.iteritems():
         print rcid, rcimg
