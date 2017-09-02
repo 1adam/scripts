@@ -3,7 +3,7 @@
 
 # let the madness begin.
 
-import docker, sys
+import sys, argparse, docker, pprint
 
 client = docker.from_env()
 
@@ -25,76 +25,73 @@ def findTheInitialParent(ID):
 
 def main():
     
-    DRYRUN=False
-    DEBUGMODE=False
+    parser = argparse.ArgumentParser(description='Clean up old docker images and containers.')
+    parser.add_argument('-d', '--debug', action='store_true', dest='DEBUGMODE', help='Enable Debug' )
+    parser.add_argument('-n', '--noop', action='store_true', dest='DRYRUN', help='NOOP / Dry Run' )
+    parser.add_argument('-v', '--version', action='version', version="That's not polite.", help='Display version' )
+    parser.add_argument('-r', '--retain', nargs=1, type=int, default=3, dest='NTR', help='# of images/containers to keep (1 = only the current/latest) per image name (eg. "nginx" in "nginx:latest")' )
+    Args = parser.parse_args()
+
+    if Args.DRYRUN:
+        print "**** NOOP / Dry Run ****"
+    if Args.DEBUGMODE:
+        print "DEBUG enabled"
+    print "Retaining", Args.NTR, "images/containers"
+
+    runImgs={}
+    runConts={}
+    keepImagesRunning=set()
+    for rc in client.containers.list():
+        imgName, imgTag = rc.image.tags[0].split(':')
+        imgId = rc.image.id
+        contName = rc.name
+        contId = rc.id
+        keepImagesRunning.add( imgId )
+        if imgName not in runImgs.iterkeys():
+            runImgs.update( { imgName: { imgTag: imgId } } )
+        if imgTag not in runImgs[imgName].iterkeys():
+            runImgs[imgName].update( { imgTag: imgId } )
+        if contName not in runConts.iterkeys():
+            runConts.update( { contName: { 'contId': contId, 'imgId': imgId, 'imgName': imgName, 'imgTag': imgTag } } )
+    if Args.DEBUGMODE:
+        print "---------"
+        pprint.pprint(runImgs)
+        print "---------"
+        pprint.pprint(runConts)
+        print "---------"
+        pprint.pprint( keepImagesRunning )
     
-    # number of containers/images to retain (take the latest N from the .list() return value)
-    # i.e. '2' means keep the latest image/container, and one image/container previous in a given image tag
-    # (e.g. the 'gsum' in the docker tag 'gsum:1.23')
-    NTR=5
-    
-    if "--help" in sys.argv[1:]:
-        print "Usage:"
-        print sys.argv[0], "< --help | [--debug] [--noop] >"
-        exit()
-    
-    if "--noop" in sys.argv[1:]:
-        DRYRUN=True
-        print "*** *** *** ***"
-        print "*** DRY RUN ***"
-        print "*** *** *** ***"
-        print ""
-    
-    if "--debug" in sys.argv[1:]:
-        DEBUGMODE=True
-    
-    initExistingImages=[]
-    for iei in client.images.list():
-        initExistingImages.append( iei.id )
-    
+
+    exit(255)
+
+
+
+
+    latestConts={}
+    latestContsKeep=[]
+    for lc in client.containers.list(limit=Args.NTR):
+        if lc.image.tags[0] not in latestConts.iterkeys():
+            latestConts.update( { lc.image.tags[0]: lc.image.id } )
+            latestContsKeep.append( lc.image.id )
+
     runConts={}
     runImgKeep=[]
+    runningRepos=[]
     for rc in client.containers.list():
         if rc.image.tags[0] not in runConts.iterkeys():
             runConts.update( {rc.image.tags[0]: rc.image.id} )
             runImgKeep.append( rc.image.id )
+            runningRepos.append( rc.image.tags[0] )
+
+    runningReposKeep=[]
+    for repotag in runningRepos:
+        for rimg in client.images.list(name=repotag)[:Args.NTR]:
+            runningReposKeep.append( rimg.id )
     
-    runRepoKeep=[]
-    for img, id in runConts.iteritems():
-        imgName, imgTag = img.split(":")
-        for rimg in client.images.list(imgName)[:NTR]:
-            runRepoKeep.append( rimg.id )
-    
-    exitedConts={}
-    for rc in client.containers.list( filters={ 'status':'exited'} ):
-        if rc.image.tags[0] not in exitedConts.iterkeys():
-            exitedConts.update( {rc.image.tags[0]: rc.image.id} )
-    
-    exitedRepoKeep=[]
-    for img, id in exitedConts.iteritems():
-        imgName = img.split(":")[0]
-        for i in client.images.list(imgName)[:NTR]:
-            imgFound = False
-            if id is i.id:
-                if (id not in runImgKeep) or (id not in runRepoKeep):
-                    exitedRepoKeep.append( id )
-                else:
-                    imgFound = True
-            if imgFound is False:
-                exitedRepoKeep.append( i.id )
-    
-    preKeepImages = runImgKeep + runRepoKeep + exitedRepoKeep
-    
-    lonelyImgs=[]
-    for iei in initExistingImages:
-        if iei not in preKeepImages:
-            ieiName = client.images.get(iei).tags[0].split(":")[0]
-            for eieio in client.images.list(ieiName)[:NTR]:
-                if eieio.id not in lonelyImgs:
-                    lonelyImgs.append( eieio.id )
+    preKeepImages = runImgKeep + latestContsKeep + runningReposKeep
     
     parentsOfKeepImages = []
-    for pki in (preKeepImages + lonelyImgs):
+    for pki in (preKeepImages):
         parentId = client.images.get(pki).attrs['Parent']
         if len(parentId) > 0:
             imgParent = findTheInitialParent( parentId )
@@ -102,12 +99,16 @@ def main():
                 if imgParent not in parentsOfKeepImages:
                     parentsOfKeepImages.append( imgParent )
     
-    keepImages = set( preKeepImages + parentsOfKeepImages ) | set( lonelyImgs )
-    
-    if DEBUGMODE:
+    keepImages = set( preKeepImages + parentsOfKeepImages )
+
+    if Args.DEBUGMODE:
         print "-- *** DEBUG *** --"
-        print "lonelyImgs:"
-        debugPrint(lonelyImgs)
+        print "latestConts:"
+        for lcimg, lcid in latestConts.iteritems():
+            print lcid, lcimg
+        print ""
+        print "latestContsKeep:"
+        debugPrint(latestContsKeep)
         print ""
         print "runConts:"
         for rcimg, rcid in runConts.iteritems():
@@ -115,16 +116,6 @@ def main():
         print ""
         print "runImgKeep:"
         debugPrint(runImgKeep)
-        print ""
-        print "runRepoKeep:"
-        debugPrint(runRepoKeep)
-        print ""
-        print "exitedConts:"
-        for ecimg, ecid in exitedConts.iteritems():
-            print ecid, ecimg
-        print ""
-        print "exitedRepoKeep:"
-        debugPrint(exitedRepoKeep)
         print ""
         print "parentsOfKeepImages:"
         debugPrint(parentsOfKeepImages)
@@ -148,7 +139,7 @@ def main():
     if len(removeContainers):
         for rc in removeContainers:
             print "Removing container", rc, client.containers.get(rc).name, client.containers.get(rc).image.tags[0], "...",
-            if DRYRUN:
+            if Args.DRYRUN:
                 print "(not really)",
             else:
                 client.containers.get(rc).remove()
@@ -163,7 +154,7 @@ def main():
             except IndexError:
                iname = "<no tag>"
             print "Removing image", ri, iname, "...",
-            if DRYRUN:
+            if Args.DRYRUN:
                 print "(not really)",
             else:
                 client.images.remove( ri )
